@@ -18,13 +18,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/argoproj/argo-cd/engine/pkg/utils/io"
 	"github.com/go-kit/kit/log"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
 	crd "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8sruntime "k8s.io/apimachinery/pkg/util/runtime"
-	k8sclientdynamic "k8s.io/client-go/dynamic"
 	k8sclient "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -388,22 +388,41 @@ func main() {
 	}()
 
 	// Cluster component.
+	fileinfo, err := os.Stat(k8sInClusterSecretsBaseDir)
+	isInCluster := err == nil && fileinfo.IsDir()
 
+	var namespace string
 	var restClientConfig *rest.Config
 	{
-		var err error
-		if *kubeConfig != "" {
-			logger.Log("msg", fmt.Sprintf("using kube config: %q to connect to the cluster", *kubeConfig))
-			restClientConfig, err = clientcmd.BuildConfigFromFlags("", *kubeConfig)
+		if isInCluster {
+			logger.Log("msg", "using in cluster config to connect to the cluster")
+			restClientConfig, err = rest.InClusterConfig()
+			if err != nil {
+				logger.Log("err", err)
+				os.Exit(1)
+			}
+			namespaceData, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+			if err != nil {
+				logger.Log("err", err)
+				os.Exit(1)
+			}
+			namespace = string(namespaceData)
 		} else {
-			restClientConfig, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-				clientcmd.NewDefaultClientConfigLoadingRules(),
-				&clientcmd.ConfigOverrides{},
-			).ClientConfig()
-		}
-		if err != nil {
-			logger.Log("err", err)
-			os.Exit(1)
+			// hacky way to tell to the engine that we are outside of cluster. for PoC only
+			logger.Log("msg", fmt.Sprintf("using kube config: %q to connect to the cluster", *kubeConfig))
+			clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				&clientcmd.ClientConfigLoadingRules{ExplicitPath: *kubeConfig},
+				&clientcmd.ConfigOverrides{})
+			restClientConfig, err = clientConfig.ClientConfig()
+			if err != nil {
+				logger.Log("err", err)
+				os.Exit(1)
+			}
+			namespace, _, err = clientConfig.Namespace()
+			if err != nil {
+				logger.Log("err", err)
+				os.Exit(1)
+			}
 		}
 		restClientConfig.QPS = 50.0
 		restClientConfig.Burst = 100
@@ -416,11 +435,6 @@ func main() {
 	var imageCreds func() registry.ImageCreds
 	{
 		clientset, err := k8sclient.NewForConfig(restClientConfig)
-		if err != nil {
-			logger.Log("err", err)
-			os.Exit(1)
-		}
-		dynamicClientset, err := k8sclientdynamic.NewForConfig(restClientConfig)
 		if err != nil {
 			logger.Log("err", err)
 			os.Exit(1)
@@ -452,8 +466,6 @@ func main() {
 		}
 		clusterVersion = "kubernetes-" + serverVersion.GitVersion
 
-		fileinfo, err := os.Stat(k8sInClusterSecretsBaseDir)
-		isInCluster := err == nil && fileinfo.IsDir()
 		if isInCluster && !httpGitURL {
 			namespace, err := ioutil.ReadFile(filepath.Join(k8sInClusterSecretsBaseDir, "serviceaccount/namespace"))
 			if err != nil {
@@ -498,15 +510,17 @@ func main() {
 		}
 		logger.Log("kubectl", kubectl)
 
-		client := kubernetes.MakeClusterClientset(clientset, dynamicClientset, fhrClientset, hrClientset, discoClientset)
-		kubectlApplier := kubernetes.NewKubectl(kubectl, restClientConfig)
-		allowedNamespaces := make(map[string]struct{})
-		for _, n := range append(*k8sNamespaceWhitelist, *k8sAllowNamespace...) {
-			allowedNamespaces[n] = struct{}{}
-		}
-		k8sInst := kubernetes.NewCluster(client, kubectlApplier, sshKeyRing, logger, allowedNamespaces, *registryExcludeImage, *k8sExcludeResource)
+		client := kubernetes.MakeClusterClientset(clientset, fhrClientset, hrClientset)
+		allowedNamespaces := append(*k8sNamespaceWhitelist, *k8sAllowNamespace...)
+		k8sInst := kubernetes.NewCluster(restClientConfig, namespace, client, sshKeyRing, logger, allowedNamespaces, *k8sExcludeResource, *registryExcludeImage)
 		k8sInst.GC = *syncGC
 		k8sInst.DryGC = *dryGC
+		closer, err := k8sInst.Run()
+		if err != nil {
+			logger.Log("error", "Failed to initialize cluster", "err", err)
+			os.Exit(1)
+		}
+		defer io.Close(closer)
 
 		if err := k8sInst.Ping(); err != nil {
 			logger.Log("ping", err)

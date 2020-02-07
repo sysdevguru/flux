@@ -8,7 +8,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/ryanuber/go-glob"
 	apiv1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/fluxcd/flux/pkg/image"
@@ -21,7 +20,7 @@ func mergeCredentials(log func(...interface{}) error,
 	client ExtendedClient,
 	namespace string, podTemplate apiv1.PodTemplateSpec,
 	imageCreds registry.ImageCreds,
-	imagePullSecretCache map[string]registry.Credentials) {
+	seenCreds map[string]registry.Credentials) {
 	var images []image.Name
 	for _, container := range podTemplate.Spec.InitContainers {
 		r, err := image.ParseRef(container.Image)
@@ -68,8 +67,7 @@ func mergeCredentials(log func(...interface{}) error,
 	}
 
 	for _, name := range imagePullSecrets {
-		namespacedSecretName := fmt.Sprintf("%s/%s", namespace, name)
-		if seen, ok := imagePullSecretCache[namespacedSecretName]; ok {
+		if seen, ok := seenCreds[name]; ok {
 			creds.Merge(seen)
 			continue
 		}
@@ -77,7 +75,7 @@ func mergeCredentials(log func(...interface{}) error,
 		secret, err := client.CoreV1().Secrets(namespace).Get(name, meta_v1.GetOptions{})
 		if err != nil {
 			log("err", errors.Wrapf(err, "getting secret %q from namespace %q", name, namespace))
-			imagePullSecretCache[namespacedSecretName] = registry.NoCredentials()
+			seenCreds[name] = registry.NoCredentials()
 			continue
 		}
 
@@ -92,13 +90,13 @@ func mergeCredentials(log func(...interface{}) error,
 			decoded, ok = secret.Data[apiv1.DockerConfigJsonKey]
 		default:
 			log("skip", "unknown type", "secret", namespace+"/"+secret.Name, "type", secret.Type)
-			imagePullSecretCache[namespacedSecretName] = registry.NoCredentials()
+			seenCreds[name] = registry.NoCredentials()
 			continue
 		}
 
 		if !ok {
 			log("err", errors.Wrapf(err, "retrieving pod secret %q", secret.Name))
-			imagePullSecretCache[namespacedSecretName] = registry.NoCredentials()
+			seenCreds[name] = registry.NoCredentials()
 			continue
 		}
 
@@ -106,10 +104,10 @@ func mergeCredentials(log func(...interface{}) error,
 		crd, err := registry.ParseCredentials(fmt.Sprintf("%s:secret/%s", namespace, name), decoded)
 		if err != nil {
 			log("err", err.Error())
-			imagePullSecretCache[namespacedSecretName] = registry.NoCredentials()
+			seenCreds[name] = registry.NoCredentials()
 			continue
 		}
-		imagePullSecretCache[namespacedSecretName] = crd
+		seenCreds[name] = crd
 
 		// Merge into the credentials for this PodSpec
 		creds.Merge(crd)
@@ -126,42 +124,30 @@ func (c *Cluster) ImagesToFetch() registry.ImageCreds {
 	allImageCreds := make(registry.ImageCreds)
 	ctx := context.Background()
 
-	namespaces, err := c.getAllowedAndExistingNamespaces(ctx)
+	seenCreds := make(map[string]registry.Credentials)
+	workloads, err := c.allWorkfloads(ctx, "")
 	if err != nil {
 		c.logger.Log("err", errors.Wrap(err, "getting namespaces"))
 		return allImageCreds
 	}
 
-	for _, ns := range namespaces {
-		imagePullSecretCache := make(map[string]registry.Credentials) // indexed by the namespace/name of pullImageSecrets
-		for kind, resourceKind := range resourceKinds {
-			workloads, err := resourceKind.getWorkloads(ctx, c, ns)
-			if err != nil {
-				if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
-					// Skip unsupported or forbidden resource kinds
-					continue
-				}
-				c.logger.Log("err", errors.Wrapf(err, "getting kind %s for namespace %s", kind, ns))
-			}
+	imageCreds := make(registry.ImageCreds)
+	for id, workload := range workloads {
+		ns, kind, _ := id.Components()
+		logger := log.With(c.logger, "resource", resource.MakeID(ns, kind, workload.GetName()))
+		mergeCredentials(logger.Log, c.includeImage, c.client, ns, workload.podTemplate, imageCreds, seenCreds)
+	}
 
-			imageCreds := make(registry.ImageCreds)
-			for _, workload := range workloads {
-				logger := log.With(c.logger, "resource", resource.MakeID(workload.GetNamespace(), kind, workload.GetName()))
-				mergeCredentials(logger.Log, c.includeImage, c.client, workload.GetNamespace(), workload.podTemplate, imageCreds, imagePullSecretCache)
-			}
-
-			// Merge creds
-			for imageID, creds := range imageCreds {
-				existingCreds, ok := allImageCreds[imageID]
-				if ok {
-					mergedCreds := registry.NoCredentials()
-					mergedCreds.Merge(existingCreds)
-					mergedCreds.Merge(creds)
-					allImageCreds[imageID] = mergedCreds
-				} else {
-					allImageCreds[imageID] = creds
-				}
-			}
+	// Merge creds
+	for imageID, creds := range imageCreds {
+		existingCreds, ok := allImageCreds[imageID]
+		if ok {
+			mergedCreds := registry.NoCredentials()
+			mergedCreds.Merge(existingCreds)
+			mergedCreds.Merge(creds)
+			allImageCreds[imageID] = mergedCreds
+		} else {
+			allImageCreds[imageID] = creds
 		}
 	}
 

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"testing"
 
+	"k8s.io/client-go/rest"
+
 	"github.com/go-kit/kit/log"
 	apiv1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,11 +30,7 @@ func testGetAllowedNamespaces(t *testing.T, namespace []string, expected []strin
 	clientset := fakekubernetes.NewSimpleClientset(newNamespace("default"),
 		newNamespace("kube-system"))
 	client := ExtendedClient{coreClient: clientset}
-	allowedNamespaces := make(map[string]struct{})
-	for _, n := range namespace {
-		allowedNamespaces[n] = struct{}{}
-	}
-	c := NewCluster(client, nil, nil, log.NewNopLogger(), allowedNamespaces, []string{}, []string{})
+	c := NewCluster(&rest.Config{}, "", client, nil, log.NewNopLogger(), namespace, []string{}, []string{})
 
 	namespaces, err := c.getAllowedAndExistingNamespaces(context.Background())
 	if err != nil {
