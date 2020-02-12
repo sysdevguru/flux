@@ -15,13 +15,19 @@ replace (
 	github.com/fluxcd/helm-operator => github.com/fluxcd/helm-operator v1.0.0-rc6
 )
 
+// to be removed after https://github.com/argoproj/argo-cd/pull/3066 is merged
+replace (
+	github.com/argoproj/argo-cd => github.com/argoproj/argo-cd v0.8.1-0.20200211191440-d3a76b462fa5 // gitops-engine branch
+	github.com/argoproj/argo-cd/engine => github.com/argoproj/argo-cd/engine v0.0.0-20200211191440-d3a76b462fa5 // gitops-engine branch
+)
+
 // Pin kubernetes dependencies to 1.16.2
 replace (
 	k8s.io/api => k8s.io/api v0.0.0-20191016110408-35e52d86657a // kubernetes-1.16.2
 	k8s.io/apiextensions-apiserver => k8s.io/apiextensions-apiserver v0.0.0-20191016113550-5357c4baaf65 // kubernetes-1.16.2
 	k8s.io/apimachinery => k8s.io/apimachinery v0.0.0-20191004115801-a2eda9f80ab8
 
-	// sorry, will work on removing dependency on kubernetes package
+	// To be removed, added by @alexmt to integrate with the gitops engine
 	k8s.io/apiserver => k8s.io/apiserver v0.16.6
 	k8s.io/cli-runtime => k8s.io/cli-runtime v0.16.6
 	k8s.io/client-go => k8s.io/client-go v0.0.0-20191016111102-bec269661e48 // kubernetes-1.16.2
@@ -101,7 +107,3 @@ require (
 	k8s.io/helm v2.16.1+incompatible
 	k8s.io/klog v1.0.0
 )
-
-// to be removed after github.com/argoproj/argo-cd/engine is merged into github.com/argoproj/gitops-engine
-// to build locally clone https://github.com/argoproj/argo-cd/tree/gitops-engine and make sure that ../go/src/github.com/argoproj/argo-cd/engine has clonned repo
-replace github.com/argoproj/argo-cd/engine => ../go/src/github.com/argoproj/argo-cd/engine
