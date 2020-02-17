@@ -22,7 +22,6 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/pflag"
-	crd "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	k8sruntime "k8s.io/apimachinery/pkg/util/runtime"
 	k8sclient "k8s.io/client-go/kubernetes"
@@ -391,38 +390,21 @@ func main() {
 	fileinfo, err := os.Stat(k8sInClusterSecretsBaseDir)
 	isInCluster := err == nil && fileinfo.IsDir()
 
-	var namespace string
 	var restClientConfig *rest.Config
 	{
-		if isInCluster {
-			logger.Log("msg", "using in cluster config to connect to the cluster")
-			restClientConfig, err = rest.InClusterConfig()
-			if err != nil {
-				logger.Log("err", err)
-				os.Exit(1)
-			}
-			namespaceData, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-			if err != nil {
-				logger.Log("err", err)
-				os.Exit(1)
-			}
-			namespace = string(namespaceData)
-		} else {
-			// hacky way to tell to the engine that we are outside of cluster. for PoC only
+		var err error
+		if *kubeConfig != "" {
 			logger.Log("msg", fmt.Sprintf("using kube config: %q to connect to the cluster", *kubeConfig))
-			clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-				&clientcmd.ClientConfigLoadingRules{ExplicitPath: *kubeConfig},
-				&clientcmd.ConfigOverrides{})
-			restClientConfig, err = clientConfig.ClientConfig()
-			if err != nil {
-				logger.Log("err", err)
-				os.Exit(1)
-			}
-			namespace, _, err = clientConfig.Namespace()
-			if err != nil {
-				logger.Log("err", err)
-				os.Exit(1)
-			}
+			restClientConfig, err = clientcmd.BuildConfigFromFlags("", *kubeConfig)
+		} else {
+			restClientConfig, err = clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				clientcmd.NewDefaultClientConfigLoadingRules(),
+				&clientcmd.ConfigOverrides{},
+			).ClientConfig()
+		}
+		if err != nil {
+			logger.Log("err", err)
+			os.Exit(1)
 		}
 		restClientConfig.QPS = 50.0
 		restClientConfig.Burst = 100
@@ -451,13 +433,6 @@ func main() {
 			logger.Log("error", fmt.Sprintf("Error building helm operator clientset: %v", err))
 			os.Exit(1)
 		}
-
-		crdClient, err := crd.NewForConfig(restClientConfig)
-		if err != nil {
-			logger.Log("error", fmt.Sprintf("Error building API extensions (CRD) clientset: %v", err))
-			os.Exit(1)
-		}
-		discoClientset := kubernetes.MakeCachedDiscovery(clientset.Discovery(), crdClient, shutdown)
 
 		serverVersion, err := clientset.ServerVersion()
 		if err != nil {
@@ -512,7 +487,11 @@ func main() {
 
 		client := kubernetes.MakeClusterClientset(clientset, fhrClientset, hrClientset)
 		allowedNamespaces := append(*k8sNamespaceWhitelist, *k8sAllowNamespace...)
-		k8sInst := kubernetes.NewCluster(restClientConfig, namespace, client, sshKeyRing, logger, allowedNamespaces, *k8sExcludeResource, *registryExcludeImage)
+		k8sInst, err := kubernetes.NewCluster(restClientConfig, *k8sDefaultNamespace, client, sshKeyRing, logger, allowedNamespaces, *k8sExcludeResource, *registryExcludeImage)
+		if err != nil {
+			logger.Log("err", err)
+			os.Exit(1)
+		}
 		k8sInst.GC = *syncGC
 		k8sInst.DryGC = *dryGC
 		closer, err := k8sInst.Run()
@@ -532,15 +511,14 @@ func main() {
 		imageCreds = k8sInst.ImagesToFetch
 		// There is only one way we currently interpret a repo of
 		// files as manifests, and that's as Kubernetes yamels.
-		namespacer, err := kubernetes.NewNamespacer(discoClientset, *k8sDefaultNamespace)
 		if err != nil {
 			logger.Log("err", err)
 			os.Exit(1)
 		}
 		if *sopsEnabled {
-			k8sManifests = kubernetes.NewSopsManifests(namespacer, logger)
+			k8sManifests = kubernetes.NewSopsManifests(k8sInst.Namespacer(), logger)
 		} else {
-			k8sManifests = kubernetes.NewManifests(namespacer, logger)
+			k8sManifests = kubernetes.NewManifests(k8sInst.Namespacer(), logger)
 		}
 	}
 

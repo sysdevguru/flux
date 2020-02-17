@@ -5,39 +5,30 @@ import (
 	"os"
 	"testing"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	corefake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	kresource "github.com/fluxcd/flux/pkg/cluster/kubernetes/resource"
 )
 
-var getAndList = metav1.Verbs([]string{"get", "list"})
+type mockScoper struct {
+	namespacedGroupKinds []schema.GroupKind
+}
 
-func makeFakeClient() *corefake.Clientset {
-	apiResources := []*metav1.APIResourceList{
-		{
-			GroupVersion: "apps/v1",
-			APIResources: []metav1.APIResource{
-				{Name: "deployments", SingularName: "deployment", Namespaced: true, Kind: "Deployment", Verbs: getAndList},
-			},
-		},
-		{
-			GroupVersion: "v1",
-			APIResources: []metav1.APIResource{
-				{Name: "namespaces", SingularName: "namespace", Namespaced: false, Kind: "Namespace", Verbs: getAndList},
-			},
-		},
-		{
-			GroupVersion: "apiextensions.k8s.io/v1beta1",
-			APIResources: []metav1.APIResource{
-				{Name: "customresourcedefinitions", SingularName: "customresourcedefinition", Namespaced: false, Kind: "CustomResourceDefinition", Verbs: getAndList},
-			},
-		},
+func (m *mockScoper) IsNamespaced(gk schema.GroupKind) bool {
+	for _, namespacedGK := range m.namespacedGroupKinds {
+		if gk == namespacedGK {
+			return true
+		}
 	}
+	return false
+}
 
-	coreClient := corefake.NewSimpleClientset()
-	coreClient.Fake.Resources = apiResources
-	return coreClient
+func newNamespacer(defaultNamespace string, scoper scoper) (*namespacerViaScoper, error) {
+	fallbackNamespace, err := getFallbackNamespace(defaultNamespace)
+	if err != nil {
+		return nil, err
+	}
+	return &namespacerViaScoper{scoper: scoper, fallbackNamespace: fallbackNamespace}, nil
 }
 
 func TestNamespaceDefaulting(t *testing.T) {
@@ -62,7 +53,6 @@ users: []
 
 	os.Setenv("KUBECONFIG", "testkubeconfig")
 	defer os.Unsetenv("KUBECONFIG")
-	coreClient := makeFakeClient()
 
 	ns, err := getKubeconfigDefaultNamespace()
 	if err != nil {
@@ -96,11 +86,12 @@ metadata:
 		t.Fatal(err)
 	}
 
-	defaultNser, err := NewNamespacer(coreClient.Discovery(), "")
+	scoper := &mockScoper{[]schema.GroupKind{{"apps", "Deployment"}}}
+	defaultNser, err := newNamespacer("", scoper)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertEffectiveNamespace := func(nser namespaceViaDiscovery, id, expected string) {
+	assertEffectiveNamespace := func(nser namespacerViaScoper, id, expected string) {
 		res, ok := manifests[id]
 		if !ok {
 			t.Errorf("manifest for %q not found", id)
@@ -120,7 +111,7 @@ metadata:
 	assertEffectiveNamespace(*defaultNser, "<cluster>:deployment/noNamespace", "namespace")
 	assertEffectiveNamespace(*defaultNser, "spurious:namespace/notNamespaced", "")
 
-	overrideNser, err := NewNamespacer(coreClient.Discovery(), "foo-override")
+	overrideNser, err := newNamespacer("foo-override", scoper)
 	if err != nil {
 		t.Fatal(err)
 	}

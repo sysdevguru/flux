@@ -95,9 +95,10 @@ type Cluster struct {
 	// dry run garbage collection without syncing
 	DryGC bool
 
-	engine    engine.GitOpsEngine
-	client    ExtendedClient
-	namespace string
+	engine            engine.GitOpsEngine
+	clusterCache      cache.ClusterCache
+	client            ExtendedClient
+	fallbackNamespace string
 
 	version    string // string response for the version command.
 	logger     log.Logger
@@ -132,11 +133,16 @@ func (f *resourceFilter) IsExcludedResource(group, kind, _ string) bool {
 }
 
 // NewCluster returns a usable cluster.
-func NewCluster(config *rest.Config, namespace string, client ExtendedClient, sshKeyRing ssh.KeyRing, logger log.Logger, allowedNamespaces []string, exclude []string, imageExcludeList []string) *Cluster {
+func NewCluster(config *rest.Config, defaultNamespace string, client ExtendedClient, sshKeyRing ssh.KeyRing, logger log.Logger, allowedNamespaces []string, exclude []string, imageExcludeList []string) (*Cluster, error) {
+	fallbackNamespace, err := getFallbackNamespace(defaultNamespace)
+	if err != nil {
+		return nil, err
+	}
+
 	cacheSettings := cache.Settings{ResourcesFilter: &resourceFilter{exclude: exclude}}
 	clusterCache := cache.NewClusterCache(cacheSettings, config, allowedNamespaces, &kube.KubectlCmd{})
 	c := &Cluster{
-		namespace:         namespace,
+		fallbackNamespace: fallbackNamespace,
 		engine:            engine.NewEngine(config, clusterCache),
 		client:            client,
 		logger:            logger,
@@ -161,7 +167,11 @@ func NewCluster(config *rest.Config, namespace string, client ExtendedClient, ss
 		}
 	})
 
-	return c
+	return c, nil
+}
+
+func (c *Cluster) Namespacer() namespacer {
+	return &namespacerViaScoper{fallbackNamespace: c.fallbackNamespace, scoper: c.clusterCache}
 }
 
 // --- cluster.Cluster

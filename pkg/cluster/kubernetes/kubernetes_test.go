@@ -30,7 +30,10 @@ func testGetAllowedNamespaces(t *testing.T, namespace []string, expected []strin
 	clientset := fakekubernetes.NewSimpleClientset(newNamespace("default"),
 		newNamespace("kube-system"))
 	client := ExtendedClient{coreClient: clientset}
-	c := NewCluster(&rest.Config{}, "", client, nil, log.NewNopLogger(), namespace, []string{}, []string{})
+	c, err := NewCluster(&rest.Config{}, "", client, nil, log.NewNopLogger(), namespace, []string{}, []string{})
+	if err != nil {
+		t.Errorf("The error should be nil, not: %s", err)
+	}
 
 	namespaces, err := c.getAllowedAndExistingNamespaces(context.Background())
 	if err != nil {

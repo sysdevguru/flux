@@ -67,7 +67,7 @@ func (c *Cluster) Sync(syncSet cluster.SyncSet) error {
 		return errors.Wrap(err, "unmarshalling repository resources")
 	}
 
-	result, err := c.engine.Sync(context.Background(), resources, isManagedResource, syncSet.Name, c.namespace, sync.WithResourcesFilter(
+	result, err := c.engine.Sync(context.Background(), resources, isManagedResource, syncSet.Name, c.fallbackNamespace, sync.WithResourcesFilter(
 		func(key kube.ResourceKey, live *unstructured.Unstructured, target *unstructured.Unstructured) bool {
 			if live != nil {
 				// don't GC resources that were not deployed by Flux with the same configuration
